@@ -7,6 +7,7 @@ z3_add_component(cmd_context
     cmd_util.cpp
     echo_tactic.cpp
     eval_cmd.cpp
+    explore_derivatives_cmd.cpp
     parametric_cmd.cpp
     pdecl.cpp
     simplify_cmd.cpp
