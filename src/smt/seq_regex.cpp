@@ -924,4 +924,22 @@ namespace smt {
         return std::string("id") + std::to_string(e->get_id());
     }
 
+    /*************************************************/
+    /*************************************************/
+    /***************** INSERTED CODE *****************/
+    /*************************************************/
+
+    void seq_regex::public_explore_all_derivs(expr* r) {
+        std::cout
+            << "Exploring all derivs of regex:" << std::endl
+            << "    " << seq_util::rex::pp(re(), r) << std::endl;
+
+        expr_ref_vector results(m);
+        // get_all_derivatives(r, results);
+    }
+
+    /*************************************************/
+    /*************************************************/
+    /*************************************************/
+
 }

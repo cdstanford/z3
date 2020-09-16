@@ -207,6 +207,8 @@ namespace smt {
 
         void propagate_is_empty(literal lit);
         
+        void public_explore_all_derivs(expr* r);
+
     };
 
 };

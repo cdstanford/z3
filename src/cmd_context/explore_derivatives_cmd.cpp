@@ -16,6 +16,7 @@ of a regex.
 #include<iomanip>
 
 #include "smt/smt_context.h"
+#include "ast/reg_decl_plugins.h"
 #include "smt/theory_seq.h"
 #include "smt/seq_regex.h"
 
@@ -63,12 +64,6 @@ public:
             throw cmd_exception("invalid explore_derivatives command, argument expected");
         expr_ref r(ctx.m());
         proof_ref pr(ctx.m());
-
-        // Get SMT handle to seq_regex
-        // Note: Not Working Yet
-        // smt::context *sctx = smt::mk_fresh();
-        smt::theory_seq th_seq(ctx);
-        smt::seq_regex th_regex(th_seq);
 
         // if (m_params.get_bool("som", false))
         //     m_params.set_bool("flat", true);
@@ -126,6 +121,18 @@ public:
         //         ctx.regular_stream() << " :num-shared " << s1.num_shared() << " :num-nodes " << get_num_exprs(r);
         //     ctx.regular_stream() << ")" << std::endl;
         // }
+
+        // Get SMT handle to seq_regex
+        smt_params params;
+        ast_manager m;
+        reg_decl_plugins(m);
+        smt::context sctx(m, params);
+        smt::theory_seq th_seq(sctx);
+        smt::seq_regex th_regex(th_seq);
+
+        // Explore all derivatives of r
+        th_regex.public_explore_all_derivs(r);
+
     }
 };
 
