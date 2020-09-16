@@ -15,6 +15,10 @@ of a regex.
 #include "util/cancel_eh.h"
 #include<iomanip>
 
+#include "smt/smt_context.h"
+#include "smt/theory_seq.h"
+#include "smt/seq_regex.h"
+
 class explore_derivatives_cmd : public parametric_cmd {
 
 
@@ -59,6 +63,13 @@ public:
             throw cmd_exception("invalid explore_derivatives command, argument expected");
         expr_ref r(ctx.m());
         proof_ref pr(ctx.m());
+
+        // Get SMT handle to seq_regex
+        // Note: Not Working Yet
+        // smt::context *sctx = smt::mk_fresh();
+        smt::theory_seq th_seq(ctx);
+        smt::seq_regex th_regex(th_seq);
+
         // if (m_params.get_bool("som", false))
         //     m_params.set_bool("flat", true);
         th_rewriter s(ctx.m(), m_params);
