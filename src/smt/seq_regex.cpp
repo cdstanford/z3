@@ -929,13 +929,31 @@ namespace smt {
     /***************** INSERTED CODE *****************/
     /*************************************************/
 
-    void seq_regex::public_explore_all_derivs(expr* r) {
+    void seq_regex::public_explore_all_derivs(expr* r_start) {
         std::cout
             << "Exploring all derivs of regex:" << std::endl
-            << "    " << seq_util::rex::pp(re(), r) << std::endl;
+            << seq_util::rex::pp(re(), r_start) << std::endl;
 
-        expr_ref_vector results(m);
-        // get_all_derivatives(r, results);
+        expr_ref_vector to_explore(m);
+        to_explore.push_back(r_start);
+        while (to_explore.size() > 0) {
+            expr_ref r(to_explore.back(), m);
+            to_explore.pop_back();
+            std::cout << "    Visiting: " << seq_util::rex::pp(re(), r);
+
+            unsigned r_id = get_state_id(r);
+            if (m_state_graph.is_done(r_id)) {
+                std::cout << " (skipped)" << std::endl;
+                continue;
+            }
+            std::cout << std::endl;
+
+            update_state_graph(r);
+            get_all_derivatives(r, to_explore);
+
+        }
+
+        std::cout << "Done" << std::endl;
     }
 
     /*************************************************/
