@@ -380,6 +380,7 @@ bool state_graph::is_disjoint(state_set set1, state_set set2) const {
     }} ((void) 0)
 bool state_graph::check_invariant() const {
     // Check state invariants
+#if 0
     SASSERT(is_subset(m_live, m_seen));
     SASSERT(is_subset(m_dead, m_seen));
     SASSERT(is_subset(m_unknown, m_seen));
@@ -414,6 +415,7 @@ bool state_graph::check_invariant() const {
           m_sources_maybecycle[s2].contains(s1)));
 
     STRACE("state_graph", tout << "(invariant passed) ";);
+#endif
     return true;
 }
 
