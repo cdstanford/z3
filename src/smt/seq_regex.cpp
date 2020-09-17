@@ -939,14 +939,15 @@ namespace smt {
         while (to_explore.size() > 0) {
             expr_ref r(to_explore.back(), m);
             to_explore.pop_back();
-            std::cout << "    Visiting: " << seq_util::rex::pp(re(), r);
+            STRACE("seq_regex_brief", tout
+                << std::endl << "    Visiting: "
+                << seq_util::rex::pp(re(), r););
 
             unsigned r_id = get_state_id(r);
             if (m_state_graph.is_done(r_id)) {
-                std::cout << " (skipped)" << std::endl;
+                STRACE("seq_regex_brief", tout << " (skipped)";);
                 continue;
             }
-            std::cout << std::endl;
 
             update_state_graph(r);
             get_all_derivatives(r, to_explore);
