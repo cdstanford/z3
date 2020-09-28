@@ -930,31 +930,93 @@ namespace smt {
     /*************************************************/
 
     void seq_regex::public_explore_all_derivs(expr* r_start) {
+
+        // Separate the calculation of all derivatives with
+        // the state graph updates, so we can measure the time
+        // separately. In the first phase we save the info
+        // to a list of updates to the graph.
+        enum update_type { AddState, AddEdge, MarkDone, MarkLive };
+        struct graph_update {
+            update_type ty;
+            unsigned state1;
+            unsigned state2; // 0 in all cases except AddEdge
+            bool maybecycle; // 0 in all cases except AddEdge
+        };
+        vector<graph_update> updates;
+
+        /* Phase 1. Explore all derivatives and save them */
         std::cout
-            << "Exploring all derivs of regex:" << std::endl
-            << seq_util::rex::pp(re(), r_start) << std::endl;
+            << ">>> Getting all derivs of regex: "
+            << seq_util::rex::pp(re(), r_start) << " ..." << std::endl;
 
         expr_ref_vector to_explore(m);
         to_explore.push_back(r_start);
+        unsigned r_start_id = get_state_id(r_start);
+        updates.push_back((struct graph_update){AddState, r_start_id, 0, false});
         while (to_explore.size() > 0) {
             expr_ref r(to_explore.back(), m);
             to_explore.pop_back();
+            unsigned r_id = get_state_id(r);
             STRACE("seq_regex_brief", tout
                 << std::endl << "    Visiting: "
                 << seq_util::rex::pp(re(), r););
 
-            unsigned r_id = get_state_id(r);
-            if (m_state_graph.is_done(r_id)) {
-                STRACE("seq_regex_brief", tout << " (skipped)";);
-                continue;
+            // Get derivatives and visit the edges; add to to_explore if
+            // not yet explored.
+            expr_ref_vector derivs(m);
+            get_all_derivatives(r, derivs);
+            for (auto const& dr : derivs) {
+                if (!m_expr_to_state.contains(dr)) {
+                    unsigned dr_id = get_state_id(dr);
+                    updates.push_back((struct graph_update){AddState, dr_id, 0, false});
+                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
+                    to_explore.push_back(dr);
+                }
+                else {
+                    unsigned dr_id = get_state_id(dr);
+                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
+                }
             }
 
-            update_state_graph(r);
-            get_all_derivatives(r, to_explore);
-
+            // Mark live / done
+            expr_ref r_nullable = is_nullable_wrapper(r);
+            if (m.is_true(r_nullable)) {
+                updates.push_back((struct graph_update){MarkLive, r_id, 0, false});
+            }
+            else {
+                SASSERT(m.is_false(r_nullable));
+            }
+            updates.push_back((struct graph_update){MarkDone, r_id, 0});
         }
 
-        std::cout << "Done" << std::endl;
+        /* Phase 2. Update the state graph using the list of updates */
+        std::cout << ">>> Updating the state graph..." << std::endl;
+
+        SASSERT(m_state_graph.get_size() == 0);
+        for (auto const& u: updates) {
+            switch(u.ty) {
+            case AddState:
+                SASSERT(u.state2 == 0 && u.maybecycle == false);
+                m_state_graph.add_state(u.state1);
+                break;
+            case AddEdge:
+                m_state_graph.add_edge(u.state1, u.state2, u.maybecycle);
+                break;
+            case MarkLive:
+                SASSERT(u.state2 == 0 && u.maybecycle == false);
+                m_state_graph.mark_live(u.state1);
+                break;
+            case MarkDone:
+                SASSERT(u.state2 == 0 && u.maybecycle == false);
+                m_state_graph.mark_done(u.state1);
+                break;
+            default:
+                UNREACHABLE();
+            }
+        }
+
+        /* End */
+        std::cout << ">>> Done!" << std::endl;
     }
 
     /*************************************************/
