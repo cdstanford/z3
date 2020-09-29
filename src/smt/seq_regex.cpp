@@ -894,7 +894,7 @@ namespace smt {
             STRACE("seq_regex_verbose", tout
                 << "getting all derivs: " << r_id << " " << std::endl;);
             get_all_derivatives(r, derivatives);
-            for (auto const& dr: derivatives) {
+            for (auto const& dr : derivatives) {
                 unsigned dr_id = get_state_id(dr);
                 STRACE("seq_regex_verbose", tout
                     << std::endl << "  traversing deriv: " << dr_id << " ";);              
@@ -940,7 +940,7 @@ namespace smt {
             update_type ty;
             unsigned state1;
             unsigned state2; // 0 in all cases except AddEdge
-            bool maybecycle; // 0 in all cases except AddEdge
+            bool maybecycle; // false in all cases except AddEdge
         };
         vector<graph_update> updates;
 
@@ -966,16 +966,14 @@ namespace smt {
             expr_ref_vector derivs(m);
             get_all_derivatives(r, derivs);
             for (auto const& dr : derivs) {
-                if (!m_expr_to_state.contains(dr)) {
-                    unsigned dr_id = get_state_id(dr);
+                bool dr_seen = m_expr_to_state.contains(dr);
+                unsigned dr_id = get_state_id(dr);
+                if (!dr_seen) {
                     updates.push_back((struct graph_update){AddState, dr_id, 0, false});
-                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
                     to_explore.push_back(dr);
                 }
-                else {
-                    unsigned dr_id = get_state_id(dr);
-                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
-                }
+                bool maybecycle = can_be_in_cycle(r, dr);
+                updates.push_back((struct graph_update){AddEdge, r_id, dr_id, maybecycle});
             }
 
             // Mark live / done
@@ -986,7 +984,7 @@ namespace smt {
             else {
                 SASSERT(m.is_false(r_nullable));
             }
-            updates.push_back((struct graph_update){MarkDone, r_id, 0});
+            updates.push_back((struct graph_update){MarkDone, r_id, 0, false});
         }
 
         /* Phase 2. Update the state graph using the list of updates */
