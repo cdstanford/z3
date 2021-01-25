@@ -1021,7 +1021,7 @@ namespace smt {
                 break;
             case MarkDone:
                 SASSERT(u.state2 == 0);
-                std::cout << "    { \"Done\": " << u.state1 << " }";
+                std::cout << "    { \"Close\": " << u.state1 << " }";
                 break;
             default:
                 UNREACHABLE();
