@@ -935,12 +935,11 @@ namespace smt {
         // the state graph updates, so we can measure the time
         // separately. In the first phase we save the info
         // to a list of updates to the graph.
-        enum update_type { AddState, AddEdge, MarkDone, MarkLive };
+        enum update_type { AddState, AddEdge, AddEdgeNocycle, MarkDone, MarkLive };
         struct graph_update {
             update_type ty;
             unsigned state1;
-            unsigned state2; // 0 in all cases except AddEdge
-            bool maybecycle; // false in all cases except AddEdge
+            unsigned state2; // 0 in all cases except AddEdge/AddEdgeNocycle
         };
         vector<graph_update> updates;
 
@@ -952,7 +951,7 @@ namespace smt {
         expr_ref_vector to_explore(m);
         to_explore.push_back(r_start);
         unsigned r_start_id = get_state_id(r_start);
-        updates.push_back((struct graph_update){AddState, r_start_id, 0, false});
+        updates.push_back((struct graph_update){AddState, r_start_id, 0});
         while (to_explore.size() > 0) {
             expr_ref r(to_explore.back(), m);
             to_explore.pop_back();
@@ -969,52 +968,99 @@ namespace smt {
                 bool dr_seen = m_expr_to_state.contains(dr);
                 unsigned dr_id = get_state_id(dr);
                 if (!dr_seen) {
-                    updates.push_back((struct graph_update){AddState, dr_id, 0, false});
+                    updates.push_back((struct graph_update){AddState, dr_id, 0});
                     to_explore.push_back(dr);
                 }
-                bool maybecycle = can_be_in_cycle(r, dr);
-                updates.push_back((struct graph_update){AddEdge, r_id, dr_id, maybecycle});
+                if (can_be_in_cycle(r, dr)) {
+                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
+                }
+                else {
+                    updates.push_back((struct graph_update){AddEdgeNocycle, r_id, dr_id});
+                }
             }
 
             // Mark live / done
             expr_ref r_nullable = is_nullable_wrapper(r);
             if (m.is_true(r_nullable)) {
-                updates.push_back((struct graph_update){MarkLive, r_id, 0, false});
+                updates.push_back((struct graph_update){MarkLive, r_id, 0});
             }
             else {
                 SASSERT(m.is_false(r_nullable));
+                updates.push_back((struct graph_update){MarkDone, r_id, 0});
             }
-            updates.push_back((struct graph_update){MarkDone, r_id, 0, false});
         }
 
-        /* Phase 2. Update the state graph using the list of updates */
-        std::cout << ">>> Updating the state graph..." << std::endl;
-
-        SASSERT(m_state_graph.get_size() == 0);
+        // NEW PHASE 2: Print out update to stdout
+        std::cout << ">>> Printing out list of state graph updates..." << std::endl;
+        // Print out in JSON format readable by the Rust development
+        bool first_update = true;
         for (auto const& u: updates) {
+            if (u.ty == AddState) {
+                // For simplification we do not explicitly record these
+                SASSERT(u.state2 == 0);
+                continue;
+            }
+            if (first_update) {
+                std::cout << "[" << std::endl;
+                first_update = false;
+            } else {
+                std::cout << "," << std::endl;
+            }
             switch(u.ty) {
             case AddState:
-                SASSERT(u.state2 == 0 && u.maybecycle == false);
-                m_state_graph.add_state(u.state1);
                 break;
             case AddEdge:
-                m_state_graph.add_edge(u.state1, u.state2, u.maybecycle);
+                std::cout << "    { \"Add\": [" << u.state1 << ", " << u.state2 << "] }";
+                break;
+            case AddEdgeNocycle:
+                std::cout << "    { \"AddNocycle\": [" << u.state1 << ", " << u.state2 << "] }";
                 break;
             case MarkLive:
-                SASSERT(u.state2 == 0 && u.maybecycle == false);
-                m_state_graph.mark_live(u.state1);
+                SASSERT(u.state2 == 0);
+                std::cout << "    { \"Live\": " << u.state1 << " }";
                 break;
             case MarkDone:
-                SASSERT(u.state2 == 0 && u.maybecycle == false);
-                m_state_graph.mark_done(u.state1);
+                SASSERT(u.state2 == 0);
+                std::cout << "    { \"Done\": " << u.state1 << " }";
                 break;
             default:
                 UNREACHABLE();
             }
         }
+        std::cout << std::endl << "]" << std::endl;
 
-        /* End */
-        std::cout << ">>> Done!" << std::endl;
+        // OLD PHASE 2
+        // /* Phase 2. Update the state graph using the list of updates */
+        // std::cout << ">>> Updating the state graph..." << std::endl;
+        //
+        // SASSERT(m_state_graph.get_size() == 0);
+        // for (auto const& u: updates) {
+        //     switch(u.ty) {
+        //     case AddState:
+        //         SASSERT(u.state2 == 0);
+        //         m_state_graph.add_state(u.state1);
+        //         break;
+        //     case AddEdge:
+        //         m_state_graph.add_edge(u.state1, u.state2, true);
+        //         break;
+        //     case AddEdgeNocycle:
+        //         m_state_graph.add_edge(u.state1, u.state2, false);
+        //         break;
+        //     case MarkLive:
+        //         SASSERT(u.state2 == 0);
+        //         m_state_graph.mark_live(u.state1);
+        //         break;
+        //     case MarkDone:
+        //         SASSERT(u.state2 == 0);
+        //         m_state_graph.mark_done(u.state1);
+        //         break;
+        //     default:
+        //         UNREACHABLE();
+        //     }
+        // }
+        //
+        // /* End */
+        // std::cout << ">>> Done!" << std::endl;
     }
 
     /*************************************************/
