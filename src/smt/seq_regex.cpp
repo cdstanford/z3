@@ -935,7 +935,7 @@ namespace smt {
         // the state graph updates, so we can measure the time
         // separately. In the first phase we save the info
         // to a list of updates to the graph.
-        enum update_type { AddState, AddEdge, AddEdgeNocycle, MarkDone, MarkLive };
+        enum update_type { AddState, AddEdge, NotReachable, MarkClosed, MarkLive };
         struct graph_update {
             update_type ty;
             unsigned state1;
@@ -971,12 +971,10 @@ namespace smt {
                     updates.push_back((struct graph_update){AddState, dr_id, 0});
                     to_explore.push_back(dr);
                 }
-                if (can_be_in_cycle(r, dr)) {
-                    updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
+                if (!can_be_in_cycle(r, dr)) {
+                    updates.push_back((struct graph_update){NotReachable, r_id, dr_id});
                 }
-                else {
-                    updates.push_back((struct graph_update){AddEdgeNocycle, r_id, dr_id});
-                }
+                updates.push_back((struct graph_update){AddEdge, r_id, dr_id});
             }
 
             // Mark live / done
@@ -986,8 +984,8 @@ namespace smt {
             }
             else {
                 SASSERT(m.is_false(r_nullable));
-                updates.push_back((struct graph_update){MarkDone, r_id, 0});
             }
+            updates.push_back((struct graph_update){MarkClosed, r_id, 0});
         }
 
         // NEW PHASE 2: Print out update to stdout
@@ -1012,14 +1010,14 @@ namespace smt {
             case AddEdge:
                 std::cout << "    { \"Add\": [" << u.state1 << ", " << u.state2 << "] }";
                 break;
-            case AddEdgeNocycle:
-                std::cout << "    { \"AddNocycle\": [" << u.state1 << ", " << u.state2 << "] }";
+            case NotReachable:
+                std::cout << "    { \"NotReachable\": [" << u.state1 << ", " << u.state2 << "] }";
                 break;
             case MarkLive:
                 SASSERT(u.state2 == 0);
                 std::cout << "    { \"Live\": " << u.state1 << " }";
                 break;
-            case MarkDone:
+            case MarkClosed:
                 SASSERT(u.state2 == 0);
                 std::cout << "    { \"Close\": " << u.state1 << " }";
                 break;
@@ -1050,7 +1048,7 @@ namespace smt {
         //         SASSERT(u.state2 == 0);
         //         m_state_graph.mark_live(u.state1);
         //         break;
-        //     case MarkDone:
+        //     case MarkClosed:
         //         SASSERT(u.state2 == 0);
         //         m_state_graph.mark_done(u.state1);
         //         break;
