@@ -3,7 +3,7 @@ Copyright (c) 2020 Microsoft Corporation
 
 Module Name:
 
-    array_solver.h
+    array_solver.cpp
 
 Abstract:
 
@@ -61,6 +61,11 @@ also currently, as a base-line it is eager:
     -------------------------------
     A = B => forall i . M[i] = B[i]
 
+A hypothetical refinement could use some limited HO pattern unification steps.
+For example
+    lambda x y z . Y z y x = lambda x y z . X x z y
+-> Y = lambda x y z . X ....
+
 --*/
 
 #include "ast/ast_ll_pp.h"
@@ -70,7 +75,7 @@ also currently, as a base-line it is eager:
 namespace array {
 
     solver::solver(euf::solver& ctx, theory_id id) :
-        th_euf_solver(ctx, id),
+        th_euf_solver(ctx, symbol("array"), id),
         a(m),
         m_sort2epsilon(m),
         m_sort2diag(m),
@@ -83,6 +88,8 @@ namespace array {
         m_constraint->initialize(m_constraint.get(), this);
     }
 
+    solver::~solver() {}
+
     sat::check_result solver::check() {
         force_push();
         // flet<bool> _is_redundant(m_is_redundant, true);
@@ -94,6 +101,10 @@ namespace array {
             else if (!turn[idx] && add_interface_equalities())
                 return sat::check_result::CR_CONTINUE;
         }
+        if (m_delay_qhead < m_axiom_trail.size()) 
+            return sat::check_result::CR_CONTINUE;
+            
+        // validate_check();
         return sat::check_result::CR_DONE;
     }
 
@@ -102,54 +113,10 @@ namespace array {
         m_var_data.resize(get_num_vars());
     }
 
-    std::ostream& solver::display(std::ostream& out) const {
-        for (unsigned i = 0; i < get_num_vars(); ++i) {
-            auto& d = get_var_data(i);
-            out << var2enode(i)->get_expr_id() << " " << mk_bounded_pp(var2expr(i), m, 2) << "\n";
-            display_info(out, "parent lambdas", d.m_parent_lambdas);
-            display_info(out, "parent select", d.m_parent_selects);
-            display_info(out, "b         ", d.m_lambdas);
-        }
-        return out;
-    }
-    std::ostream& solver::display_info(std::ostream& out, char const* id, euf::enode_vector const& v) const {
-        if (v.empty())
-            return out;
-        out << id << ": ";
-        for (euf::enode* p : v)
-            out << mk_bounded_pp(p->get_expr(), m, 2) << " ";
-        out << "\n";
-        return out;
-    }
-
-    std::ostream& solver::display_justification(std::ostream& out, sat::ext_justification_idx idx) const { return out; }
-    std::ostream& solver::display_constraint(std::ostream& out, sat::ext_constraint_idx idx) const { return out; }
-
-    void solver::collect_statistics(statistics& st) const {
-        st.update("array store",        m_stats.m_num_store_axiom);
-        st.update("array sel/store",    m_stats.m_num_select_store_axiom);
-        st.update("array sel/const",    m_stats.m_num_select_const_axiom);
-        st.update("array sel/map",      m_stats.m_num_select_map_axiom);
-        st.update("array sel/as array", m_stats.m_num_select_as_array_axiom);
-        st.update("array sel/lambda",   m_stats.m_num_select_lambda_axiom);
-        st.update("array def/map",      m_stats.m_num_default_map_axiom);
-        st.update("array def/const",    m_stats.m_num_default_const_axiom);
-        st.update("array def/store",    m_stats.m_num_default_store_axiom);
-        st.update("array ext ax",       m_stats.m_num_extensionality_axiom);
-        st.update("array cong ax",      m_stats.m_num_congruence_axiom);        
-        st.update("array exp ax2",      m_stats.m_num_select_store_axiom_delayed);
-        st.update("array splits",       m_stats.m_num_eq_splits);
-    }
-
-    euf::th_solver* solver::fresh(sat::solver* s, euf::solver& ctx) {
-        auto* result = alloc(solver, ctx, get_id());
-        ast_translation tr(m, ctx.get_manager());
-        for (unsigned i = 0; i < get_num_vars(); ++i) {
-            expr* e1 = var2expr(i);
-            expr* e2 = tr(e1);
-            euf::enode* n = ctx.get_enode(e2);
-            result->mk_var(n);
-        }
+    euf::th_solver* solver::clone(euf::solver& dst_ctx) {
+        auto* result = alloc(solver, dst_ctx, get_id());
+        for (unsigned i = 0; i < get_num_vars(); ++i)          
+            result->mk_var(ctx.copy(dst_ctx, var2enode(i)));        
         return result;
     }
 
@@ -158,14 +125,22 @@ namespace array {
         m_find.merge(eq.v1(), eq.v2());
     }
 
+    void solver::new_diseq_eh(euf::th_eq const& eq) {
+        force_push();
+        euf::enode* n1 = var2enode(eq.v1());
+        euf::enode* n2 = var2enode(eq.v2());
+        if (is_array(n1))
+            push_axiom(extensionality_axiom(n1, n2));
+    }
+
     bool solver::unit_propagate() {
         if (m_qhead == m_axiom_trail.size())
             return false;
         force_push();
         bool prop = false;
-        ctx.push(value_trail<euf::solver, unsigned>(m_qhead));
+        ctx.push(value_trail<unsigned>(m_qhead));
         for (; m_qhead < m_axiom_trail.size() && !s().inconsistent(); ++m_qhead)
-            if (assert_axiom(m_qhead))
+            if (propagate_axiom(m_qhead))
                 prop = true;
         return prop;
     }
@@ -173,8 +148,8 @@ namespace array {
     void solver::merge_eh(theory_var v1, theory_var v2, theory_var, theory_var) {
         euf::enode* n1 = var2enode(v1);
         euf::enode* n2 = var2enode(v2);
+        TRACE("array", tout << "merge: " << ctx.bpp(n1) << " == " << ctx.bpp(n2) << "\n";);
         SASSERT(n1->get_root() == n2->get_root());
-        SASSERT(n1->is_root() || n2->is_root());
         SASSERT(v1 == find(v1));
         expr* e1 = n1->get_expr();
         expr* e2 = n2->get_expr();
@@ -192,19 +167,14 @@ namespace array {
             push_axiom(congruence_axiom(n1, n2));
     }
 
-    void solver::tracked_push(euf::enode_vector& v, euf::enode* n) {
-        v.push_back(n);
-        ctx.push(push_back_trail<euf::solver, euf::enode*, false>(v));
-    }
-
     void solver::add_parent_select(theory_var v_child, euf::enode* select) {
         SASSERT(a.is_select(select->get_expr()));
-        SASSERT(m.get_sort(select->get_arg(0)->get_expr()) == m.get_sort(var2expr(v_child)));
-
+        SASSERT(select->get_arg(0)->get_sort() == var2expr(v_child)->get_sort());
         v_child = find(v_child);
-        tracked_push(get_var_data(v_child).m_parent_selects, select);
+        ctx.push_vec(get_var_data(v_child).m_parent_selects, select);
         euf::enode* child = var2enode(v_child);
-        if (can_beta_reduce(child))
+        TRACE("array", tout << "v" << v_child << " - " << ctx.bpp(select) << " " << ctx.bpp(child) << " prop: " << should_prop_upward(get_var_data(v_child)) << "\n";);
+        if (can_beta_reduce(child)) 
             push_axiom(select_axiom(select, child));
     }
 
@@ -213,7 +183,7 @@ namespace array {
         auto& d = get_var_data(find(v));
         if (should_set_prop_upward(d))
             set_prop_upward(d);
-        tracked_push(d.m_lambdas, lambda);
+        ctx.push_vec(d.m_lambdas, lambda);
         if (should_set_prop_upward(d)) {
             set_prop_upward(lambda);
             propagate_select_axioms(d, lambda);
@@ -223,7 +193,7 @@ namespace array {
     void solver::add_parent_lambda(theory_var v_child, euf::enode* lambda) {
         SASSERT(can_beta_reduce(lambda));
         auto& d = get_var_data(find(v_child));
-        tracked_push(d.m_parent_lambdas, lambda);
+        ctx.push_vec(d.m_parent_lambdas, lambda);
         if (should_set_prop_upward(d))
             propagate_select_axioms(d, lambda);
     }
@@ -253,7 +223,9 @@ namespace array {
         expr* e = var2expr(v);
         if (!a.is_array(e))
             return;
+        
         auto& d = get_var_data(v);
+
         for (euf::enode* lambda : d.m_parent_lambdas)
             propagate_select_axioms(d, lambda);
     }
@@ -262,7 +234,7 @@ namespace array {
         auto& d = get_var_data(find(v));
         if (d.m_prop_upward)
             return;
-        ctx.push(reset_flag_trail<euf::solver>(d.m_prop_upward));
+        ctx.push(reset_flag_trail(d.m_prop_upward));
         d.m_prop_upward = true;
         if (should_prop_upward(d))
             propagate_parent_select_axioms(v);

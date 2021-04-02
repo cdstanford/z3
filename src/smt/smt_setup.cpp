@@ -33,6 +33,7 @@ Revision History:
 #include "smt/theory_dl.h"
 #include "smt/theory_seq_empty.h"
 #include "smt/theory_seq.h"
+#include "smt/theory_char.h"
 #include "smt/theory_special_relations.h"
 #include "smt/theory_pb.h"
 #include "smt/theory_fpa.h"
@@ -227,7 +228,7 @@ namespace smt {
     void setup::setup_QF_BVRE() {
         setup_QF_BV();
         setup_QF_LIA();
-        m_context.register_plugin(alloc(theory_seq, m_context));
+        setup_seq();
     }
 
     void setup::setup_QF_UF(static_features const & st) {        
@@ -542,6 +543,8 @@ namespace smt {
         if (st.m_has_real)
             throw default_exception("Benchmark has real variables but it is marked as QF_UFLIA (uninterpreted functions and linear integer arithmetic).");
         setup_QF_UFLIA();
+        if (st.m_has_bv) 
+            setup_QF_BV();
     }
 
     void setup::setup_QF_UFLRA() {
@@ -640,7 +643,8 @@ namespace smt {
         // It destroys the existing patterns.
         // m_params.m_macro_finder            = true; 
         
-        m_params.m_ng_lift_ite             = LI_CONSERVATIVE;
+        if (m_params.m_ng_lift_ite == LI_NONE)
+            m_params.m_ng_lift_ite         = LI_CONSERVATIVE;
         TRACE("setup", tout << "max_eager_multipatterns: " << m_params.m_qi_max_eager_multipatterns << "\n";);
         m_context.register_plugin(alloc(smt::theory_i_arith, m_context));
         setup_arrays();
@@ -664,7 +668,8 @@ namespace smt {
         m_params.m_qi_lazy_threshold       = 20;
         // 
         m_params.m_macro_finder            = true;
-        m_params.m_ng_lift_ite             = LI_CONSERVATIVE; 
+        if (m_params.m_ng_lift_ite == LI_NONE)
+            m_params.m_ng_lift_ite         = LI_CONSERVATIVE;
         m_params.m_pi_max_multi_patterns   = 10; //<< it was used for SMT-COMP
         m_params.m_array_lazy_ieq          = true;
         m_params.m_array_lazy_ieq_delay    = 4;
@@ -716,15 +721,23 @@ namespace smt {
         else if (m_params.m_string_solver == "seq") {
             setup_unknown();
         }
+        else if (m_params.m_string_solver == "char") {
+            setup_QF_BV();
+            setup_char();
+        }
         else if (m_params.m_string_solver == "auto") {
             setup_unknown();
         }
  
         else if (m_params.m_string_solver == "empty") {
-            m_context.register_plugin(alloc(smt::theory_seq_empty, m_context));
+            setup_seq();
         }
         else if (m_params.m_string_solver == "none") {
             // don't register any solver.
+        }
+        else if (m_params.m_string_solver == "char") {
+            setup_QF_BV();
+            setup_char();
         }
         else {
             throw default_exception("invalid parameter for smt.string_solver, valid options are 'z3str3', 'seq', 'auto'");
@@ -891,7 +904,7 @@ namespace smt {
             setup_seq();
         } 
         else if (m_params.m_string_solver == "empty") {
-            m_context.register_plugin(alloc(smt::theory_seq_empty, m_context));
+            setup_seq();
         }
         else if (m_params.m_string_solver == "none") {
             // don't register any solver.
@@ -925,6 +938,11 @@ namespace smt {
 
     void setup::setup_seq() {
         m_context.register_plugin(alloc(smt::theory_seq, m_context));
+        setup_char();
+    }
+
+    void setup::setup_char() {
+        m_context.register_plugin(alloc(smt::theory_char, m_context));        
     }
 
     void setup::setup_special_relations() {

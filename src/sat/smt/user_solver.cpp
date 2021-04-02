@@ -21,7 +21,7 @@ Author:
 namespace user {
 
     solver::solver(euf::solver& ctx) :
-        th_euf_solver(ctx, ctx.get_manager().mk_family_id("user"))
+        th_euf_solver(ctx, symbol("user"), ctx.get_manager().mk_family_id("user"))
     {}
 
     solver::~solver() {
@@ -92,7 +92,7 @@ namespace user {
         if (m_qhead == m_prop.size())
             return false;
         force_push();
-        ctx.push(value_trail<euf::solver, unsigned>(m_qhead));
+        ctx.push(value_trail<unsigned>(m_qhead));
         unsigned np = m_stats.m_num_propagations;
         for (; m_qhead < m_prop.size() && !s().inconsistent(); ++m_qhead) {
             auto const& prop = m_prop[m_qhead];
@@ -146,12 +146,10 @@ namespace user {
         return display_justification(out, idx);     
     }
 
-    euf::th_solver* solver::fresh(sat::solver* dst_s, euf::solver& dst_ctx) {
+    euf::th_solver* solver::clone(euf::solver& dst_ctx) {
         auto* result = alloc(solver, dst_ctx);
-        result->set_solver(dst_s);
-        ast_translation tr(m, dst_ctx.get_manager(), false);
-        for (unsigned i = 0; i < get_num_vars(); ++i) 
-            result->add_expr(tr(var2expr(i)));
+        for (unsigned i = 0; i < get_num_vars(); ++i)
+            result->add_expr(ctx.copy(dst_ctx, var2enode(i))->get_expr());
         return result;
     }
 

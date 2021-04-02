@@ -18,6 +18,7 @@ Revision History:
 --*/
 #pragma once
 
+#include "ast/ast_pp.h"
 #include "smt/smt_enode.h"
 #include "smt/smt_quantifier.h"
 #include "util/obj_hashtable.h"
@@ -403,7 +404,7 @@ namespace smt {
         }
 
         app * get_expr(theory_var v) const {
-            return get_enode(v)->get_owner();
+            return get_enode(v)->get_expr();
         }
 
         /**
@@ -446,9 +447,9 @@ namespace smt {
         
         std::ostream& display_flat_app(std::ostream & out, app * n) const;
         
-        std::ostream& display_var_def(std::ostream & out, theory_var v) const { return display_app(out, get_enode(v)->get_owner()); }
+        std::ostream& display_var_def(std::ostream & out, theory_var v) const { return display_app(out, get_enode(v)->get_expr()); }
         
-        std::ostream& display_var_flat_def(std::ostream & out, theory_var v) const { return display_flat_app(out, get_enode(v)->get_owner());  }
+        std::ostream& display_var_flat_def(std::ostream & out, theory_var v) const { return display_flat_app(out, get_enode(v)->get_expr());  }
 
     protected:
         void log_axiom_instantiation(app * r, unsigned axiom_id = UINT_MAX, unsigned num_bindings = 0, 
@@ -524,8 +525,13 @@ namespace smt {
            behavior conflicts with a convention used by the theory/family.
         */
         virtual app * mk_eq_atom(expr * lhs, expr * rhs) {
+            ast_manager& m = get_manager();
             if (lhs->get_id() > rhs->get_id())
                 std::swap(lhs, rhs);
+            if (m.are_distinct(lhs, rhs))                
+                return m.mk_false();
+            if (m.are_equal(lhs, rhs))
+                return m.mk_true();
             return get_manager().mk_eq(lhs, rhs);
         }
 

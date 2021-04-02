@@ -70,6 +70,7 @@ public:
 
     expr * get_some_value(sort * s) override;
     expr * get_fresh_value(sort * s) override;
+    void register_value(expr* n);
     bool get_some_values(sort * s, expr_ref & v1, expr_ref & v2) override;
 
     ptr_vector<expr> const & get_universe(sort * s) const override;
@@ -78,6 +79,7 @@ public:
     bool has_uninterpreted_sort(sort * s) const;
 
     expr_ref get_inlined_const_interp(func_decl* f);
+    expr_ref unfold_as_array(expr* e);
 
     //
     // Primitives for building models

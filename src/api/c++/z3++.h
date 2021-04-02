@@ -607,7 +607,7 @@ namespace z3 {
         unsigned id() const { unsigned r = Z3_get_sort_id(ctx(), *this); check_error(); return r; }
 
         /**
-           \brief Return true if this sort and \c s are equal.
+           \brief Assign sort s to this
         */
         sort & operator=(sort const & s) { return static_cast<sort&>(ast::operator=(s)); }
         /**
@@ -824,6 +824,11 @@ namespace z3 {
         bool is_numeral(std::string& s, unsigned precision) const { if (!is_numeral()) return false; s = Z3_get_numeral_decimal_string(ctx(), m_ast, precision); check_error(); return true; }
         bool is_numeral(double& d) const { if (!is_numeral()) return false; d = Z3_get_numeral_double(ctx(), m_ast); check_error(); return true; }
         bool as_binary(std::string& s) const { if (!is_numeral()) return false; s = Z3_get_numeral_binary_string(ctx(), m_ast); check_error(); return true; }
+
+        double as_double() const { double d = 0; is_numeral(d); return d; }
+        uint64_t as_uint64() const { uint64_t r = 0; is_numeral_u64(r); return r; }
+        uint64_t as_int64() const { int64_t r = 0; is_numeral_i64(r); return r; }
+        
 
         /**
            \brief Return true if this expression is an application.
@@ -1469,6 +1474,8 @@ namespace z3 {
     }
     inline expr operator==(expr const & a, int b) { assert(a.is_arith() || a.is_bv() || a.is_fpa()); return a == a.ctx().num_val(b, a.get_sort()); }
     inline expr operator==(int a, expr const & b) { assert(b.is_arith() || b.is_bv() || b.is_fpa()); return b.ctx().num_val(a, b.get_sort()) == b; }
+    inline expr operator==(expr const & a, double b) { assert(a.is_fpa()); return a == a.ctx().fpa_val(b); }
+    inline expr operator==(double a, expr const & b) { assert(b.is_fpa()); return b.ctx().fpa_val(a) == b; }
 
     inline expr operator!=(expr const & a, expr const & b) {
         check_context(a, b);
@@ -1479,6 +1486,8 @@ namespace z3 {
     }
     inline expr operator!=(expr const & a, int b) { assert(a.is_arith() || a.is_bv() || a.is_fpa()); return a != a.ctx().num_val(b, a.get_sort()); }
     inline expr operator!=(int a, expr const & b) { assert(b.is_arith() || b.is_bv() || b.is_fpa()); return b.ctx().num_val(a, b.get_sort()) != b; }
+    inline expr operator!=(expr const & a, double b) { assert(a.is_fpa()); return a != a.ctx().fpa_val(b); }
+    inline expr operator!=(double a, expr const & b) { assert(b.is_fpa()); return b.ctx().fpa_val(a) != b; }
 
     inline expr operator+(expr const & a, expr const & b) {
         check_context(a, b);
@@ -1542,6 +1551,9 @@ namespace z3 {
         }
         else if (a.is_bv() && b.is_bv()) {
             r = Z3_mk_bvsge(a.ctx(), a, b);
+        }
+        else if (a.is_fpa() && b.is_fpa()) {
+            r = Z3_mk_fpa_geq(a.ctx(), a, b);
         }
         else {
             // operator is not supported by given arguments.
@@ -2401,16 +2413,6 @@ namespace z3 {
         }
         void from_file(char const* file) { Z3_solver_from_file(ctx(), m_solver, file); ctx().check_parser_error(); }
         void from_string(char const* s) { Z3_solver_from_string(ctx(), m_solver, s); ctx().check_parser_error(); }
-
-        expr lower(expr const& e) { 
-            Z3_ast r = Z3_solver_get_implied_lower(ctx(), m_solver, e); check_error(); return expr(ctx(), r); 
-        }
-        expr upper(expr const& e) { 
-            Z3_ast r = Z3_solver_get_implied_upper(ctx(), m_solver, e); check_error(); return expr(ctx(), r); 
-        }
-        expr value(expr const& e) { 
-            Z3_ast r = Z3_solver_get_implied_value(ctx(), m_solver, e); check_error(); return expr(ctx(), r); 
-        }
 
         check_result check() { Z3_lbool r = Z3_solver_check(ctx(), m_solver); check_error(); return to_check_result(r); }
         check_result check(unsigned n, expr * const assumptions) {

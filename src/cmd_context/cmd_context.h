@@ -35,10 +35,10 @@ Notes:
 #include "ast/rewriter/seq_rewriter.h"
 #include "tactic/generic_model_converter.h"
 #include "solver/solver.h"
+#include "solver/check_logic.h"
 #include "solver/progress_callback.h"
 #include "cmd_context/pdecl.h"
 #include "cmd_context/tactic_manager.h"
-#include "cmd_context/check_logic.h"
 #include "params/context_params.h"
 
 
@@ -84,6 +84,7 @@ public:
     bool empty() const { return !m_decls || m_decls->empty(); }
     expr* find(unsigned arity, sort *const* domain) const;
     void erase_last(ast_manager& m);
+    macro_decl const& last() const { return m_decls->back(); }
     vector<macro_decl>::iterator begin() const { return m_decls->begin(); }
     vector<macro_decl>::iterator end() const { return m_decls->end(); }
 };
@@ -159,6 +160,18 @@ public:
     virtual void updt_params(params_ref const& p) = 0;
 };
 
+class ast_context_params : public context_params { 
+    ast_manager* m_manager { nullptr };
+public:
+    /**
+       \brief Create an AST manager using this configuration.
+    */
+    ast_manager * mk_ast_manager();
+
+    void set_foreign_manager(ast_manager* m) { m_manager = m; }
+    bool owns_manager() const { return m_manager != nullptr; }
+};
+
 class cmd_context : public progress_callback, public tactic_manager, public ast_printer_context {
 public:
     enum status {
@@ -178,8 +191,10 @@ public:
         ~scoped_watch() { m_ctx.m_watch.stop(); }
     };
 
+    
+
 protected:
-    context_params               m_params;
+    ast_context_params                  m_params;
     bool                         m_main_ctx;
     symbol                       m_logic;
     bool                         m_interactive_mode;
@@ -197,7 +212,8 @@ protected:
 
     static std::ostringstream    g_error_stream;
 
-    generic_model_converter_ref  m_mc0;
+    generic_model_converter* mc0() { return m_mcs.back(); }
+    sref_vector<generic_model_converter> m_mcs;
     ast_manager *                m_manager;
     bool                         m_own_manager;
     bool                         m_manager_initialized;
@@ -368,7 +384,7 @@ public:
     check_sat_state cs_state() const;
     void complete_model(model_ref& mdl) const;
     void validate_model();
-    void analyze_failure(model_evaluator& ev, expr* e, bool expected_value);
+    void analyze_failure(expr_mark& seen, model_evaluator& ev, expr* e, bool expected_value);
     void display_detailed_analysis(std::ostream& out, model_evaluator& ev, expr* e);
     void display_model(model_ref& mdl);
 
@@ -449,7 +465,7 @@ public:
 
     dictionary<macro_decls> const & get_macros() const { return m_macros; }
 
-    model_converter* get_model_converter() { return m_mc0.get(); }
+    model_converter* get_model_converter() { return mc0(); }
 
     bool is_model_available(model_ref& md) const;
 

@@ -13,39 +13,25 @@ Author:
 
     Nikolaj Bjorner (nbjorner) 2020-08-23
 
+Notes:
 --*/
+
 
 #include "ast/euf/euf_egraph.h"
 #include "ast/ast_pp.h"
-#include "ast/ast_ll_pp.h"
 #include "ast/ast_translation.h"
 
 namespace euf {
 
-
-    void egraph::undo_eq(enode* r1, enode* n1, unsigned r2_num_parents) {
-        enode* r2 = r1->get_root();
-        r2->dec_class_size(r1->class_size());
-        std::swap(r1->m_next, r2->m_next);
-        auto begin = r2->begin_parents() + r2_num_parents, end = r2->end_parents();
-        // DEBUG_CODE(for (auto it = begin; it != end; ++it) VERIFY(((*it)->merge_enabled()) == m_table.contains(*it)););
-        for (auto it = begin; it != end; ++it) 
-            if ((*it)->merge_enabled())
-                m_table.erase(*it);
-        for (enode* c : enode_class(r1)) 
-            c->m_root = r1;
-        for (auto it = begin; it != end; ++it) 
-            if ((*it)->merge_enabled())
-                m_table.insert(*it);
-        
-        r2->m_parents.shrink(r2_num_parents);
-        unmerge_justification(n1);
-    }
-
-    enode* egraph::mk_enode(expr* f, unsigned num_args, enode * const* args) {
-        enode* n = enode::mk(m_region, f, num_args, args);
+    enode* egraph::mk_enode(expr* f, unsigned generation, unsigned num_args, enode * const* args) {
+        enode* n = enode::mk(m_region, f, generation, num_args, args);
         m_nodes.push_back(n);
         m_exprs.push_back(f);
+        if (is_app(f) && num_args > 0) {
+           unsigned id = to_app(f)->get_decl()->get_decl_id();
+           m_decl2enodes.reserve(id+1);
+           m_decl2enodes[id].push_back(n);
+        }
         m_expr2enode.setx(f->get_id(), n, nullptr);
         push_node(n);
         for (unsigned i = 0; i < num_args; ++i)
@@ -53,13 +39,39 @@ namespace euf {
         return n;
     }
 
-    void egraph::reinsert(enode* p) {
-        if (p->merge_enabled()) {
-            auto rc = m_table.insert(p);
-            merge(rc.first, p, justification::congruence(rc.second));        
+    enode* egraph::find(expr* e, unsigned n, enode* const* args) {
+        if (m_tmp_node && m_tmp_node_capacity < n) {
+            memory::deallocate(m_tmp_node);
+            m_tmp_node = nullptr;
         }
-        else if (p->is_equality())
-            reinsert_equality(p);
+        if (!m_tmp_node) {
+            m_tmp_node = enode::mk_tmp(n);
+            m_tmp_node_capacity = n;
+        }
+        for (unsigned i = 0; i < n; ++i) 
+            m_tmp_node->m_args[i] = args[i];
+        m_tmp_node->m_num_args = n;
+        m_tmp_node->m_expr = e;
+        m_tmp_node->m_table_id = UINT_MAX;
+        return m_table.find(m_tmp_node);
+    }
+
+
+    enode_vector const& egraph::enodes_of(func_decl* f) {
+        unsigned id = f->get_decl_id();
+        if (id < m_decl2enodes.size())
+            return m_decl2enodes[id];
+        return m_empty_enodes;
+    }
+
+    enode_bool_pair egraph::insert_table(enode* p) {
+        auto rc = m_table.insert(p);
+        p->m_cg = rc.first;
+        return rc;
+    }
+
+    void egraph::erase_from_table(enode* p) {
+        m_table.erase(p);
     }
 
     void egraph::reinsert_equality(enode* p) {
@@ -72,12 +84,14 @@ namespace euf {
     void egraph::force_push() {
         if (m_num_scopes == 0)
             return;
+        // DEBUG_CODE(invariant(););
+
         for (; m_num_scopes > 0; --m_num_scopes) {
             m_scopes.push_back(m_updates.size());
             m_region.push_scope();
+            m_updates.push_back(update_record(m_new_th_eqs_qhead, update_record::new_th_eq_qhead()));
+            m_updates.push_back(update_record(m_new_lits_qhead, update_record::new_lits_qhead()));
         }
-        m_updates.push_back(update_record(m_new_th_eqs_qhead, update_record::new_th_eq_qhead()));
-        m_updates.push_back(update_record(m_new_lits_qhead, update_record::new_lits_qhead()));
         SASSERT(m_new_lits_qhead <= m_new_lits.size());
         SASSERT(m_new_th_eqs_qhead <= m_new_th_eqs.size());
     }
@@ -88,14 +102,17 @@ namespace euf {
         n->set_update_children();            
     }
 
-    enode* egraph::mk(expr* f, unsigned num_args, enode *const* args) {
+    enode* egraph::mk(expr* f, unsigned generation, unsigned num_args, enode *const* args) {
         SASSERT(!find(f));
         force_push();
-        enode *n = mk_enode(f, num_args, args);
+        enode *n = mk_enode(f, generation, num_args, args);
+        
         SASSERT(n->class_size() == 1);        
         if (num_args == 0 && m.is_unique_value(f))
             n->mark_interpreted();
-        if (num_args == 0) 
+        if (m_on_make)
+            m_on_make(n);
+        if (num_args == 0)             
             return n;
         if (m.is_eq(f)) {
             n->set_is_equality();
@@ -103,7 +120,7 @@ namespace euf {
             reinsert_equality(n);
             return n;
         }
-        enode_bool_pair p = m_table.insert(n);
+        enode_bool_pair p = insert_table(n);
         enode* n2 = p.first;
         if (n2 == n) 
             update_children(n);        
@@ -114,12 +131,13 @@ namespace euf {
 
     egraph::egraph(ast_manager& m) : m(m), m_table(m), m_exprs(m) {
         m_tmp_eq = enode::mk_tmp(m_region, 2);
-        // m_updates.reserve(10000, update_record(nullptr));
     }
 
     egraph::~egraph() {
         for (enode* n : m_nodes) 
             n->m_parents.finalize();
+        if (m_tmp_node)
+            memory::deallocate(m_tmp_node);
     }
 
     void egraph::add_th_eq(theory_id id, theory_var v1, theory_var v2, enode* c, enode* r) {
@@ -151,7 +169,7 @@ namespace euf {
         enode* arg1 = n->get_arg(0), * arg2 = n->get_arg(1);
         enode* r1 = arg1->get_root();
         enode* r2 = arg2->get_root();
-        TRACE("euf", tout << "new-diseq:  " << mk_pp(r1->get_expr(), m) << " " << mk_pp(r2->get_expr(), m) << ": " << r1->has_th_vars() << " " << r2->has_th_vars() << "\n";);
+        TRACE("euf", tout << "new-diseq:  " << bpp(r1) << " " << bpp(r2) << ": " << r1->has_th_vars() << " " << r2->has_th_vars() << "\n";);
         if (r1 == r2) {
             add_literal(n, true);
             return;
@@ -208,8 +226,6 @@ namespace euf {
         return m_th_propagates_diseqs.get(id, false);
     }
 
-
-
     void egraph::add_th_var(enode* n, theory_var v, theory_id id) {
         force_push();
         theory_var w = n->get_th_var(id);
@@ -248,16 +264,33 @@ namespace euf {
 
     void egraph::set_merge_enabled(enode* n, bool enable_merge) {
         if (enable_merge != n->merge_enabled()) {
+            toggle_merge_enabled(n);
             m_updates.push_back(update_record(n, update_record::toggle_merge()));
-            n->set_merge_enabled(enable_merge);
         }
+    }
+
+    void egraph::toggle_merge_enabled(enode* n) {
+       bool enable_merge = !n->merge_enabled();
+       n->set_merge_enabled(enable_merge);         
+       if (n->num_args() > 0) {
+           if (enable_merge)
+               insert_table(n);
+           else if (m_table.contains_ptr(n))
+               erase_from_table(n);
+       }
+       VERIFY(n->num_args() == 0 || !n->merge_enabled() || m_table.contains(n));
     }
 
     void egraph::set_value(enode* n, lbool value) {        
         force_push();
+        TRACE("euf", tout << bpp(n) << "\n";);
         SASSERT(n->value() == l_undef);
         n->set_value(value);
         m_updates.push_back(update_record(n, update_record::value_assignment()));
+    }
+
+    void egraph::set_lbl_hash(enode* n) {
+        NOT_IMPLEMENTED_YET();
     }
 
     void egraph::pop(unsigned num_scopes) {
@@ -267,17 +300,20 @@ namespace euf {
         }
         num_scopes -= m_num_scopes;
         m_num_scopes = 0;
-        
+
         SASSERT(m_new_lits_qhead <= m_new_lits.size());
         unsigned old_lim = m_scopes.size() - num_scopes;
         unsigned num_updates = m_scopes[old_lim];
         auto undo_node = [&]() {
             enode* n = m_nodes.back();
             expr* e = m_exprs.back();
-            if (n->num_args() > 0)
-                m_table.erase(n);
+            if (n->num_args() > 0 && n->is_cgr()) 
+                erase_from_table(n);
+            
             m_expr2enode[e->get_id()] = nullptr;
             n->~enode();
+            if (is_app(e) && n->num_args() > 0)
+               m_decl2enodes[to_app(e)->get_decl()->get_decl_id()].pop_back();
             m_nodes.pop_back();
             m_exprs.pop_back();
         };
@@ -288,7 +324,7 @@ namespace euf {
                 undo_node();
                 break;
             case update_record::tag_t::is_toggle_merge:
-                p.r1->set_merge_enabled(!p.r1->merge_enabled());
+                toggle_merge_enabled(p.r1);
                 break;
             case update_record::tag_t::is_set_parent:
                 undo_eq(p.r1, p.n1, p.r2_num_parents);
@@ -328,21 +364,26 @@ namespace euf {
         m_updates.shrink(num_updates);
         m_scopes.shrink(old_lim);        
         m_region.pop_scope(num_scopes);  
-        m_worklist.reset();
+        m_to_merge.reset();
+
         SASSERT(m_new_lits_qhead <= m_new_lits.size());
         SASSERT(m_new_th_eqs_qhead <= m_new_th_eqs.size());
+
+        // DEBUG_CODE(invariant(););
     }
 
     void egraph::merge(enode* n1, enode* n2, justification j) {
-        if (!n1->merge_enabled() && !n2->merge_enabled()) 
-            return;        
-        SASSERT(m.get_sort(n1->get_expr()) == m.get_sort(n2->get_expr()));
+
+        if (!n1->merge_enabled() && !n2->merge_enabled())
+            return;
+        SASSERT(n1->get_sort() == n2->get_sort());
         enode* r1 = n1->get_root();
         enode* r2 = n2->get_root();
         if (r1 == r2)
             return;
-        TRACE("euf", j.display(tout << "merge: " << mk_bounded_pp(n1->get_expr(), m) << " == " << mk_bounded_pp(n2->get_expr(), m) << " ", m_display_justification) << "\n";);
-        IF_VERBOSE(20, j.display(verbose_stream() << "merge: " << mk_bounded_pp(n1->get_expr(), m) << " == " << mk_bounded_pp(n2->get_expr(), m) << " ", m_display_justification) << "\n";);
+
+        TRACE("euf", j.display(tout << "merge: " << bpp(n1) << " == " << bpp(n2) << " ", m_display_justification) << "\n";);
+        IF_VERBOSE(20, j.display(verbose_stream() << "merge: " << bpp(n1) << " == " << bpp(n2) << " ", m_display_justification) << "\n";);
         force_push();
         SASSERT(m_num_scopes == 0);
         ++m_stats.m_num_merge;
@@ -350,37 +391,66 @@ namespace euf {
             set_conflict(n1, n2, j);
             return;
         }
-        if ((r1->class_size() > r2->class_size() && !r2->interpreted()) || r1->interpreted() || r1->value() != l_undef) {
+        if (!r2->interpreted() && 
+             (r1->class_size() > r2->class_size() || r1->interpreted() || r1->value() != l_undef)) {
             std::swap(r1, r2);
             std::swap(n1, n2);
         }
-        if (r1->value() != l_undef)
-            return;
-        if (j.is_congruence() && (m.is_false(r2->get_expr()) || m.is_true(r2->get_expr()))) {
+        if (j.is_congruence() && (m.is_false(r2->get_expr()) || m.is_true(r2->get_expr())))
             add_literal(n1, false);
-        }
         if (n1->is_equality() && n1->value() == l_false)
-            new_diseq(n1);       
-        unsigned num_merge = 0, num_eqs = 0;
-        for (enode* p : enode_parents(n1)) {
-            if (p->merge_enabled()) {
-                m_table.erase(p);    
-                m_worklist.push_back(p);
-                ++num_merge;
-            }        
-            else if (p->is_equality()) {
-                m_worklist.push_back(p);
-                ++num_eqs;
-            }
-        }
+            new_diseq(n1);
+        remove_parents(r1, r2);
         push_eq(r1, n1, r2->num_parents());
         merge_justification(n1, n2, j);
         for (enode* c : enode_class(n1)) 
             c->m_root = r2;
         std::swap(r1->m_next, r2->m_next);
         r2->inc_class_size(r1->class_size());   
-        r2->m_parents.append(r1->m_parents);
         merge_th_eq(r1, r2);
+        reinsert_parents(r1, r2);
+        if (m_on_merge)
+            m_on_merge(r2, r1);
+    }
+
+    void egraph::remove_parents(enode* r1, enode* r2) {
+        for (enode* p : enode_parents(r1)) {
+            if (p->is_marked1())
+                continue;
+            if (p->merge_enabled()) {
+                if (!p->is_cgr())
+                    continue;
+                SASSERT(m_table.contains_ptr(p));
+                p->mark1();
+                erase_from_table(p);
+                SASSERT(!m_table.contains_ptr(p));
+            }
+            else if (p->is_equality())
+                p->mark1();
+        }
+    }
+
+    void egraph::reinsert_parents(enode* r1, enode* r2) {
+        for (enode* p : enode_parents(r1)) {
+            if (!p->is_marked1())
+                continue;
+            p->unmark1();
+            if (p->merge_enabled()) {
+                auto rc = insert_table(p);
+                enode* p_other = rc.first;
+                SASSERT(m_table.contains_ptr(p) == (p_other == p));
+                if (p_other != p)
+                    m_to_merge.push_back(to_merge(p_other, p, rc.second));
+                else
+                    r2->m_parents.push_back(p);
+                if (p->is_equality())
+                    reinsert_equality(p);
+            }
+            else if (p->is_equality()) {
+                r2->m_parents.push_back(p);
+                reinsert_equality(p);
+            }
+        }
     }
 
     void egraph::merge_th_eq(enode* n, enode* root) {
@@ -400,25 +470,41 @@ namespace euf {
         }
     }
 
+    void egraph::undo_eq(enode* r1, enode* n1, unsigned r2_num_parents) {
+        enode* r2 = r1->get_root();
+        TRACE("euf", tout << "undo-eq old-root: " << bpp(r1) << " current-root " << bpp(r2) << " node: " << bpp(n1) << "\n";);
+        r2->dec_class_size(r1->class_size());
+        std::swap(r1->m_next, r2->m_next);
+        auto begin = r2->begin_parents() + r2_num_parents, end = r2->end_parents();
+        for (auto it = begin; it != end; ++it) {
+            enode* p = *it;
+            TRACE("euf", tout << "erase " << bpp(p) << "\n";);
+            SASSERT(!p->merge_enabled() || m_table.contains_ptr(p));
+            SASSERT(!p->merge_enabled() || p->is_cgr());
+            if (p->merge_enabled())
+                erase_from_table(p);
+        }
+
+        for (enode* c : enode_class(r1))
+            c->m_root = r1;
+
+        for (enode* p : enode_parents(r1)) 
+            if (p->merge_enabled() && (p->is_cgr() || !p->congruent(p->m_cg))) 
+                insert_table(p);                    
+        r2->m_parents.shrink(r2_num_parents);
+        unmerge_justification(n1);
+    }
+
+
     bool egraph::propagate() {
         SASSERT(m_new_lits_qhead <= m_new_lits.size());
-        SASSERT(m_num_scopes == 0 || m_worklist.empty());
-        unsigned head = 0, tail = m_worklist.size();
-        while (head < tail && m.limit().inc() && !inconsistent()) {
-            for (unsigned i = head; i < tail && !inconsistent(); ++i) {
-                enode* n = m_worklist[i];
-                if (!n->is_marked1()) {
-                    n->mark1();
-                    reinsert(n);
-                }
-            }
-            for (unsigned i = head; i < tail; ++i)
-                m_worklist[i]->unmark1();
-            head = tail;
-            tail = m_worklist.size();
-        }
-        m_worklist.reset();
+        SASSERT(m_num_scopes == 0 || m_to_merge.empty());
         force_push();
+        for (unsigned i = 0; i < m_to_merge.size() && m.limit().inc() && !inconsistent(); ++i) {
+            auto const& w = m_to_merge[i];
+            merge(w.a, w.b, justification::congruence(w.commutativity));                
+        }
+        m_to_merge.reset();
         return 
             (m_new_lits_qhead < m_new_lits.size()) || 
             (m_new_th_eqs_qhead < m_new_th_eqs.size()) ||
@@ -474,7 +560,7 @@ namespace euf {
             return false;
         if (ra->interpreted() && rb->interpreted())
             return true;
-        if (m.get_sort(ra->get_expr()) != m.get_sort(rb->get_expr()))
+        if (ra->get_sort() != rb->get_sort())
             return true;
         expr_ref eq(m.mk_eq(a->get_expr(), b->get_expr()), m);
         m_tmp_eq->m_args[0] = a;
@@ -496,6 +582,7 @@ namespace euf {
     void egraph::push_congruence(enode* n1, enode* n2, bool comm) {
         SASSERT(is_app(n1->get_expr()));
         SASSERT(n1->get_decl() == n2->get_decl());
+        m_uses_congruence = true;
         if (m_used_cc && !comm) { 
             m_used_cc(to_app(n1->get_expr()), to_app(n2->get_expr()));
         }
@@ -542,6 +629,7 @@ namespace euf {
 
     void egraph::begin_explain() {
         SASSERT(m_todo.empty());
+        m_uses_congruence = false;
     }
 
     void egraph::end_explain() {
@@ -565,10 +653,7 @@ namespace euf {
         SASSERT(a->get_root() == b->get_root());
         
         enode* lca = find_lca(a, b);
-        TRACE("euf_verbose", tout << "explain-eq: " << a->get_expr_id() << " = " << b->get_expr_id() 
-            << ": " << mk_bounded_pp(a->get_expr(), m) 
-            << " == " << mk_bounded_pp(b->get_expr(), m) 
-            << " lca: " << mk_bounded_pp(lca->get_expr(), m) << "\n";);
+        TRACE("euf_verbose", tout << "explain-eq: " << bpp(a) << " == " << bpp(b) << " lca: " << bpp(lca) << "\n";);
         push_to_lca(a, lca);
         push_to_lca(b, lca);
         if (m_used_eq)
@@ -577,12 +662,33 @@ namespace euf {
     }
 
     template <typename T>
+    unsigned egraph::explain_diseq(ptr_vector<T>& justifications, enode* a, enode* b) {
+        enode* ra = a->get_root(), * rb = b->get_root();
+        SASSERT(ra != rb);
+        if (ra->interpreted() && rb->interpreted()) {
+            explain_eq(justifications, a, ra);
+            explain_eq(justifications, b, rb);
+            return UINT_MAX;
+        }
+        expr_ref eq(m.mk_eq(a->get_expr(), b->get_expr()), m);
+        m_tmp_eq->m_args[0] = a;
+        m_tmp_eq->m_args[1] = b;
+        m_tmp_eq->m_expr = eq;
+        SASSERT(m_tmp_eq->num_args() == 2);
+        enode* r = m_table.find(m_tmp_eq);
+        SASSERT(r && r->get_root()->value() == l_false);
+        explain_eq(justifications, r, r->get_root());
+        return r->get_root()->bool_var();
+    }
+
+
+    template <typename T>
     void egraph::explain_todo(ptr_vector<T>& justifications) {
         for (unsigned i = 0; i < m_todo.size(); ++i) {
             enode* n = m_todo[i];
             if (n->m_target && !n->is_marked1()) {
                 n->mark1();
-                CTRACE("euf", m_display_justification, n->m_justification.display(tout << n->get_expr_id() << " = " << n->m_target->get_expr_id() << " ", m_display_justification) << "\n";);
+                CTRACE("euf_verbose", m_display_justification, n->m_justification.display(tout << n->get_expr_id() << " = " << n->m_target->get_expr_id() << " ", m_display_justification) << "\n";);
                 explain_eq(justifications, n, n->m_target, n->m_justification);
             }
         }
@@ -590,11 +696,20 @@ namespace euf {
 
     void egraph::invariant() {
         for (enode* n : m_nodes)
-            n->invariant();
+            n->invariant(*this);
+        for (enode* n : m_nodes)
+            if (n->merge_enabled() && n->num_args() > 0 && (!m_table.find(n) || n->get_root() != m_table.find(n)->get_root())) {
+                CTRACE("euf", !m_table.find(n), tout << "node is not in table\n";);
+                CTRACE("euf", m_table.find(n), tout << "root " << bpp(n->get_root()) << " table root " << bpp(m_table.find(n)->get_root()) << "\n";);
+                TRACE("euf", display(tout << bpp(n) << " is not closed under congruence\n"););
+                UNREACHABLE();
+            }
+
+
     }
 
     std::ostream& egraph::display(std::ostream& out, unsigned max_args, enode* n) const {
-        out << n->get_expr_id() << " := ";
+        out << "#" << n->get_expr_id() << " := ";
         expr* f = n->get_expr();
         if (is_app(f))
             out << mk_bounded_pp(f, m, 1) << " ";
@@ -610,12 +725,16 @@ namespace euf {
                 out << " " << p->get_expr_id();
             out << "] ";
         }
+        if (n->value() != l_undef) 
+            out << "[v" << n->bool_var() << " := " << (n->value() == l_true ? "T":"F") << "] ";
         if (n->has_th_vars()) {
             out << "[t";
             for (auto v : enode_th_vars(n))
                 out << " " << v.get_id() << ":" << v.get_var();
             out << "] ";
         }
+        if (n->generation() > 0)
+            out << "[g " << n->generation() << "] ";
         if (n->m_target && m_display_justification)
             n->m_justification.display(out << "[j " << n->m_target->get_expr_id() << " ", m_display_justification) << "] ";
         out << "\n";
@@ -653,13 +772,14 @@ namespace euf {
         for (unsigned i = 0; i < src.m_nodes.size(); ++i) {
             enode* n1 = src.m_nodes[i];
             expr* e1 = src.m_exprs[i];
-            SASSERT(!n1->has_th_vars());
             args.reset();
             for (unsigned j = 0; j < n1->num_args(); ++j) 
                 args.push_back(old_expr2new_enode[n1->get_arg(j)->get_expr_id()]);
             expr*  e2 = tr(e1);
-            enode* n2 = mk(e2, args.size(), args.c_ptr());
+            enode* n2 = mk(e2, n1->generation(), args.size(), args.c_ptr());
             old_expr2new_enode.setx(e1->get_id(), n2, nullptr);
+            n2->set_value(n2->value());
+            n2->m_bool_var = n1->m_bool_var;
         }
         for (unsigned i = 0; i < src.m_nodes.size(); ++i) {             
             enode* n1 = src.m_nodes[i];
@@ -667,8 +787,8 @@ namespace euf {
             enode* n2 = m_nodes[i];
             enode* n2t = n1t ? old_expr2new_enode[n1->get_expr_id()] : nullptr;
             SASSERT(!n1t || n2t);
-            SASSERT(!n1t || src.m.get_sort(n1->get_expr()) == src.m.get_sort(n1t->get_expr()));
-            SASSERT(!n1t || m.get_sort(n2->get_expr()) == m.get_sort(n2t->get_expr()));
+            SASSERT(!n1t || n1->get_sort() == n1t->get_sort());
+            SASSERT(!n1t || n2->get_sort() == n2t->get_sort());
             if (n1t && n2->get_root() != n2t->get_root()) 
                 merge(n2, n2t, n1->m_justification.copy(copy_justification));
         }
@@ -679,8 +799,92 @@ namespace euf {
 template void euf::egraph::explain(ptr_vector<int>& justifications);
 template void euf::egraph::explain_todo(ptr_vector<int>& justifications);
 template void euf::egraph::explain_eq(ptr_vector<int>& justifications, enode* a, enode* b);
+template unsigned euf::egraph::explain_diseq(ptr_vector<int>& justifications, enode* a, enode* b);
 
 template void euf::egraph::explain(ptr_vector<size_t>& justifications);
 template void euf::egraph::explain_todo(ptr_vector<size_t>& justifications);
 template void euf::egraph::explain_eq(ptr_vector<size_t>& justifications, enode* a, enode* b);
+template unsigned euf::egraph::explain_diseq(ptr_vector<size_t>& justifications, enode* a, enode* b);
 
+
+
+#if 0
+Each node has a congruence closure root, cg.
+cg is set to the representative in the cc table 
+(first insertion of congruent node).
+Each node n has a set of parents, denoted n.P.
+The table maintains the invariant
+ - p.cg = find(p)
+
+Merge sets r2 to the root of r1 
+(r2 and r1 are both considered roots before the merge).
+The operation Unmerge reverses the effect of Merge.
+
+
+Merge(r1, r2)
+-------------
+
+Erase:        for each p in r1.P such that p.cg == p:
+                 erase from table        
+Update root:  r1.root := r2
+Insert:       for each p in r1.P:
+                 p.cg = insert p in table
+                 if p.cg == p:
+                   append p to r2.P
+                 else 
+                   add (p.cg == p) to "to_merge" 
+
+Unmerge(r1, r2)
+---------------
+
+Erase:        for each p in r2.P added from r1.P:
+                 erase p from table 
+Revert root:  r1.root := r1
+Insert:       for each p in r1.P:
+                 insert p if n was cc root before merge
+
+condition for being cc root before merge:
+  p.cg == p or !congruent(p, p.cg)
+
+congruent(p,q) := roots of p.args = roots of q.args
+
+The algorithm orients r1, r2 such that class_size(r1) <= class_size(r2).
+With N nodes, there can be at most N calls to Merge.
+Each of the calls traverse r1.P from the smaller class size.
+Label a merge tree with nodes from the larger class size.
+In other words, if Merge(r2,r1); Merge(r3,r1) is a sequence
+of calls where r1 is selected root, then the merge tree is
+
+    r1 
+  /   \
+ r1    r3  
+   \
+   r2
+
+Note that parent lists are re-examined only for nodes that join
+from right subtrees (with lesser class sizes).
+Claim: a node participates in a path along right adjoining sub-trees at most O(log(N)) times.
+Justification (very roughly): the size of a right adjoining subtree can at most 
+be equal to the left adjoining sub-tree. This entails a logarithmic number of 
+re-examinations from the right adjoining tree.
+
+The parent lists are bounded by the maximal arity of functions.
+
+Example:
+
+Initially:
+ n1 := f(a,b)  has root n1
+ n2 := f(a1,b) has root n2
+ table = [f(a,b) |-> n1, f(a1,b) |-> n2]
+
+merge(a,a1) (a1 becomes root)
+ table = [f(a1,b) |-> n2]
+ n1.cg = n2
+ a1.P = [n2]
+ n1 is not added as parent because it is not a cc root after the assignment a.root := a1
+
+unmerge(a,a1)
+- nothing is erased
+- n1 is reinserted. It used to be a root.
+
+#endif

@@ -27,6 +27,7 @@ Notes:
 #include "ast/bv_decl_plugin.h"
 #include "ast/array_decl_plugin.h"
 #include "ast/datatype_decl_plugin.h"
+#include "ast/char_decl_plugin.h"
 #include "ast/seq_decl_plugin.h"
 #include "ast/pb_decl_plugin.h"
 #include "ast/fpa_decl_plugin.h"
@@ -220,7 +221,7 @@ func_decl * func_decls::find(ast_manager & m, unsigned num_args, expr * const * 
         first();
     ptr_buffer<sort> sorts;
     for (unsigned i = 0; i < num_args; i++)
-        sorts.push_back(m.get_sort(args[i]));
+        sorts.push_back(args[i]->get_sort());
     return find(num_args, sorts.c_ptr(), range);
 }
 
@@ -279,6 +280,20 @@ void macro_decls::erase_last(ast_manager& m) {
     m_decls->pop_back();
 }
 
+ast_manager * ast_context_params::mk_ast_manager() {
+    if (m_manager)
+        return m_manager;
+    ast_manager * r = alloc(ast_manager,
+                            m_proof ? PGM_ENABLED : PGM_DISABLED,
+                            m_trace ? m_trace_file_name.c_str() : nullptr);
+    if (m_smtlib2_compliant)
+        r->enable_int_real_coercions(false);
+    if (m_debug_ref_count)
+        r->debug_ref_count();
+    return r;
+}
+
+
 bool cmd_context::contains_func_decl(symbol const& s, unsigned n, sort* const* domain, sort* range) const {
     func_decls fs;
     return m_func_decls.find(s, fs) && fs.contains(n, domain, range);
@@ -326,7 +341,7 @@ bool cmd_context::macros_find(symbol const& s, unsigned n, expr*const* args, exp
         bool eq = true;
         coerced_args.reset();
         for (unsigned i = 0; eq && i < n; ++i) {
-            if (d.m_domain[i] == m().get_sort(args[i])) {
+            if (d.m_domain[i] == args[i]->get_sort()) {
                 coerced_args.push_back(args[i]);
                 continue;
             }
@@ -334,6 +349,10 @@ bool cmd_context::macros_find(symbol const& s, unsigned n, expr*const* args, exp
             arith_util au(m());
             if (au.is_real(d.m_domain[i]) && au.is_int(args[i])) {
                 coerced_args.push_back(au.mk_to_real(args[i]));
+                continue;
+            }
+            if (au.is_int(d.m_domain[i]) && au.is_real(args[i])) {
+                coerced_args.push_back(au.mk_to_int(args[i]));
                 continue;
             }
             eq = false;
@@ -497,6 +516,7 @@ cmd_context::cmd_context(bool main_ctx, ast_manager * m, symbol const & l):
     install_basic_cmds(*this);
     install_ext_basic_cmds(*this);
     install_core_tactic_cmds(*this);
+    m_mcs.push_back(nullptr);
     SASSERT(m != 0 || !has_manager());
     if (m_main_ctx) {
         set_verbose_stream(diagnostic_stream());
@@ -512,7 +532,7 @@ cmd_context::~cmd_context() {
     finalize_tactic_cmds();
     finalize_probes();
     reset(true);
-    m_mc0 = nullptr;
+    m_mcs.reset();
     m_solver = nullptr;
     m_check_sat_result = nullptr;
 }
@@ -695,6 +715,7 @@ void cmd_context::init_manager_core(bool new_manager) {
         register_plugin(symbol("array"),    alloc(array_decl_plugin), logic_has_array());
         register_plugin(symbol("datatype"), alloc(datatype_decl_plugin), logic_has_datatype());
         register_plugin(symbol("recfun"),   alloc(recfun::decl::plugin), logic_has_recfun());
+        register_plugin(symbol("char"),     alloc(char_decl_plugin), logic_has_seq());
         register_plugin(symbol("seq"),      alloc(seq_decl_plugin), logic_has_seq());
         register_plugin(symbol("pb"),       alloc(pb_decl_plugin), logic_has_pb());
         register_plugin(symbol("fpa"),      alloc(fpa_decl_plugin), logic_has_fpa());
@@ -712,6 +733,7 @@ void cmd_context::init_manager_core(bool new_manager) {
         load_plugin(symbol("array"),    logic_has_array(), fids);
         load_plugin(symbol("datatype"), logic_has_datatype(), fids);
         load_plugin(symbol("recfun"),   logic_has_recfun(), fids);
+        load_plugin(symbol("char"),     logic_has_seq(), fids);
         load_plugin(symbol("seq"),      logic_has_seq(), fids);
         load_plugin(symbol("fpa"),      logic_has_fpa(), fids);
         load_plugin(symbol("pb"),       logic_has_pb(), fids);
@@ -845,7 +867,7 @@ void cmd_context::insert(symbol const & s, unsigned arity, sort *const* domain, 
     if (contains_macro(s, arity, domain)) {
         throw cmd_exception("named expression already defined");
     }
-    if (contains_func_decl(s, arity, domain, m().get_sort(t))) {
+    if (contains_func_decl(s, arity, domain, t->get_sort())) {
         throw cmd_exception("invalid named expression, declaration already defined with this name ", s);
     }
     TRACE("insert_macro", tout << "new macro " << arity << "\n" << mk_pp(t, m()) << "\n";);
@@ -885,21 +907,22 @@ void cmd_context::insert(symbol const & s, object_ref * r) {
 }
 
 void cmd_context::model_add(symbol const & s, unsigned arity, sort *const* domain, expr * t) {
-    if (!m_mc0.get()) m_mc0 = alloc(generic_model_converter, m(), "cmd_context");
-    if (m_solver.get() && !m_solver->mc0()) m_solver->set_model_converter(m_mc0.get()); 
-    func_decl_ref fn(m().mk_func_decl(s, arity, domain, m().get_sort(t)), m());
+    if (!mc0()) m_mcs.set(m_mcs.size()-1, alloc(generic_model_converter, m(), "cmd_context"));
+    if (m_solver.get() && !m_solver->mc0()) m_solver->set_model_converter(mc0()); 
+    func_decl_ref fn(m().mk_func_decl(s, arity, domain, t->get_sort()), m());
     func_decls & fs = m_func_decls.insert_if_not_there(s, func_decls());
     fs.insert(m(), fn);
-    VERIFY(fn->get_range() == m().get_sort(t));
-    m_mc0->add(fn, t);
+    VERIFY(fn->get_range() == t->get_sort());
+    mc0()->add(fn, t);
     if (!m_global_decls)
         m_func_decls_stack.push_back(sf_pair(s, fn));
 }
 
+
 void cmd_context::model_del(func_decl* f) {
-    if (!m_mc0.get()) m_mc0 = alloc(generic_model_converter, m(), "cmd_context");
-    if (m_solver.get() && !m_solver->mc0()) m_solver->set_model_converter(m_mc0.get()); 
-    m_mc0->hide(f);
+    if (!mc0()) m_mcs.set(m_mcs.size() - 1, alloc(generic_model_converter, m(), "cmd_context"));
+    if (m_solver.get() && !m_solver->mc0()) m_solver->set_model_converter(mc0());
+    mc0()->hide(f);
 }
 
 
@@ -1058,7 +1081,7 @@ void cmd_context::mk_app(symbol const & s, unsigned num_args, expr * const * arg
         TRACE("macro_bug", tout << "well_sorted_check_enabled(): " << well_sorted_check_enabled() << "\n";
               tout << "s: " << s << "\n";
               tout << "body:\n" << mk_ismt2_pp(_t, m()) << "\n";
-              tout << "args:\n"; for (unsigned i = 0; i < num_args; i++) tout << mk_ismt2_pp(args[i], m()) << "\n" << mk_pp(m().get_sort(args[i]), m()) << "\n";);
+              tout << "args:\n"; for (unsigned i = 0; i < num_args; i++) tout << mk_ismt2_pp(args[i], m()) << "\n" << mk_pp(args[i]->get_sort(), m()) << "\n";);
         var_subst subst(m());
         scoped_rlimit no_limit(m().limit(), 0);
         result = subst(_t, coerced_args);
@@ -1075,7 +1098,7 @@ void cmd_context::mk_app(symbol const & s, unsigned num_args, expr * const * arg
             decl_kind k   = d.m_decl;
             // Hack: if d.m_next != 0, we use the sort of args[0] (if available) to decide which plugin we use.
             if (d.m_decl != 0 && num_args > 0) {
-                builtin_decl const & d2 = peek_builtin_decl(d, m().get_sort(args[0])->get_family_id());
+                builtin_decl const & d2 = peek_builtin_decl(d, args[0]->get_sort()->get_family_id());
                 fid = d2.m_fid;
                 k   = d2.m_decl;
             }
@@ -1123,7 +1146,7 @@ void cmd_context::mk_app(symbol const & s, unsigned num_args, expr * const * arg
             bool first = true;
             for (unsigned i = 0; i < num_args; ++i, first = false) {
                 if (!first) buffer << " ";
-                buffer << mk_pp(m().get_sort(args[i]), m());
+                buffer << mk_pp(args[i]->get_sort(), m());
             }            
             buffer << ") ";
             if (range) buffer << mk_pp(range, m()) << " ";
@@ -1291,7 +1314,8 @@ void cmd_context::reset(bool finalize) {
     reset_func_decls();
     restore_assertions(0);
     m_solver = nullptr;
-    m_mc0 = nullptr;
+    m_mcs.reset();
+    m_mcs.push_back(nullptr);
     m_scopes.reset();
     m_opt = nullptr;
     m_pp_env = nullptr;
@@ -1365,6 +1389,8 @@ void cmd_context::push() {
     s.m_assertions_lim         = m_assertions.size();
     if (!m_global_decls)
         pm().push();
+    ast_translation tr(m(), m());
+    m_mcs.push_back(m_mcs.back() ? m_mcs.back()->copy(tr) : nullptr);
     unsigned timeout = m_params.m_timeout;
     m().limit().push(m_params.rlimit());
     cancel_eh<reslimit> eh(m().limit());
@@ -1490,6 +1516,7 @@ void cmd_context::pop(unsigned n) {
     restore_aux_pdecls(s.m_aux_pdecls_lim);
     restore_assertions(s.m_assertions_lim);
     restore_psort_inst(s.m_psort_inst_stack_lim);
+    m_mcs.shrink(m_mcs.size() - n);
     m_scopes.shrink(new_lvl);
     if (!m_global_decls)
         pm().pop(n);
@@ -1651,7 +1678,7 @@ void cmd_context::display_dimacs() {
 
 void cmd_context::display_model(model_ref& mdl) {
     if (mdl) {
-        if (m_mc0) (*m_mc0)(mdl);
+        if (mc0()) (*mc0())(mdl);
         model_params p;
         if (p.compact()) mdl->compress();
         add_declared_functions(*mdl);
@@ -1660,7 +1687,7 @@ void cmd_context::display_model(model_ref& mdl) {
             model_v2_pp(buffer, *mdl, false);
             regular_stream() << '"' << escaped(buffer.str(), true) << '"' << std::endl;
         } else {
-            regular_stream() << "(model " << std::endl;
+            regular_stream() << "(" << std::endl;
             model_smt2_pp(regular_stream(), *this, *mdl, 2);
             regular_stream() << ")" << std::endl;
         }
@@ -1674,7 +1701,7 @@ void cmd_context::add_declared_functions(model& mdl) {
             expr* val = mdl.get_some_value(f->get_range());
             if (f->get_arity() == 0) {
                 mdl.register_decl(f, val);
-                }
+            }
             else {
                 func_interp* fi = alloc(func_interp, m(), f->get_arity());
                 fi->set_else(val);
@@ -1754,6 +1781,8 @@ struct contains_underspecified_op_proc {
     void operator()(var * n)        {}
     void operator()(app * n)        {
         if (m_dt.is_accessor(n->get_decl())) 
+            throw found();
+        if (m_dt.is_update_field(n->get_decl())) 
             throw found();
         if (n->get_family_id() == m_seq_id && m_seq.is_re(n))
             throw found();
@@ -1864,6 +1893,7 @@ void cmd_context::validate_model() {
         cancel_eh<reslimit> eh(m().limit());
         expr_ref r(m());
         scoped_ctrl_c ctrlc(eh);
+        expr_mark seen;
         bool invalid_model = false;
         for (expr * a : assertions()) {
             if (is_ground(a)) {
@@ -1873,6 +1903,8 @@ void cmd_context::validate_model() {
                 if (m().is_true(r))
                     continue;
 
+                TRACE("model_validate", tout << *md << "\n";);
+
                 // The evaluator for array expressions is not complete
                 // If r contains as_array/store/map/const expressions, then we do not generate the error.
                 // TODO: improve evaluator for model expressions.
@@ -1881,14 +1913,15 @@ void cmd_context::validate_model() {
                     continue;
                 }
                 try {
-                    for_each_expr(contains_underspecified, a);
+                    if (!m().is_false(r))
+                        for_each_expr(contains_underspecified, a);
                     for_each_expr(contains_underspecified, r);
                 }
                 catch (const contains_underspecified_op_proc::found &) {
                     continue;
                 }
 
-                analyze_failure(evaluator, a, true);
+                analyze_failure(seen, evaluator, a, true);
                 IF_VERBOSE(11, model_smt2_pp(verbose_stream(), *this, *md, 0););                
                 TRACE("model_validate", model_smt2_pp(tout, *this, *md, 0););
                 invalid_model |= m().is_false(r);
@@ -1900,16 +1933,19 @@ void cmd_context::validate_model() {
     }
 }
 
-void cmd_context::analyze_failure(model_evaluator& ev, expr* a, bool expected_value) {
+void cmd_context::analyze_failure(expr_mark& seen, model_evaluator& ev, expr* a, bool expected_value) {
     expr* c = nullptr, *t = nullptr, *e = nullptr;
+    if (seen.is_marked(a))
+        return;
+    seen.mark(a, true);
     if (m().is_not(a, e)) {
-        analyze_failure(ev, e, !expected_value);
+        analyze_failure(seen, ev, e, !expected_value);
         return;
     }
     if (!expected_value && m().is_or(a)) {
         for (expr* arg : *to_app(a)) {
             if (ev.is_true(arg)) {
-                analyze_failure(ev, arg, false);
+                analyze_failure(seen, ev, arg, false);
                 return;
             }
         }
@@ -1917,39 +1953,39 @@ void cmd_context::analyze_failure(model_evaluator& ev, expr* a, bool expected_va
     if (expected_value && m().is_and(a)) {
         for (expr* arg : *to_app(a)) {
             if (ev.is_false(arg)) {
-                analyze_failure(ev, arg, true);
+                analyze_failure(seen, ev, arg, true);
                 return;
             }
         }
     }
     if (expected_value && m().is_ite(a, c, t, e)) {
         if (ev.is_true(c) && ev.is_false(t)) {
-            if (!m().is_true(c)) analyze_failure(ev, c, false);
-            if (!m().is_false(t)) analyze_failure(ev, t, true);
+            if (!m().is_true(c)) analyze_failure(seen, ev, c, false);
+            if (!m().is_false(t)) analyze_failure(seen, ev, t, true);
             return;
         }
         if (ev.is_false(c) && ev.is_false(e)) {
-            if (!m().is_false(c)) analyze_failure(ev, c, true);
-            if (!m().is_false(e)) analyze_failure(ev, e, true);
+            if (!m().is_false(c)) analyze_failure(seen, ev, c, true);
+            if (!m().is_false(e)) analyze_failure(seen, ev, e, true);
             return;
         }
     }
     if (!expected_value && m().is_ite(a, c, t, e)) {
         if (ev.is_true(c) && ev.is_true(t)) {
-            if (!m().is_true(c)) analyze_failure(ev, c, false);
-            if (!m().is_true(t)) analyze_failure(ev, t, false);
+            if (!m().is_true(c)) analyze_failure(seen, ev, c, false);
+            if (!m().is_true(t)) analyze_failure(seen, ev, t, false);
             return;
         }
         if (ev.is_false(c) && ev.is_true(e)) {
-            if (!m().is_false(c)) analyze_failure(ev, c, true);
-            if (!m().is_true(e)) analyze_failure(ev, e, false);
+            if (!m().is_false(c)) analyze_failure(seen, ev, c, true);
+            if (!m().is_true(e)) analyze_failure(seen, ev, e, false);
             return;
         }
     }
-    IF_VERBOSE(10, verbose_stream() << "model check failed on: " << " " << mk_pp(a, m()) << "\n";);                
-    IF_VERBOSE(10, verbose_stream() << "expected value: " << (expected_value?"true":"false") << "\n";);                
+    IF_VERBOSE(10, verbose_stream() << "#" << a->get_id() << " " << mk_pp(a, m()) << " expected: "
+               << (expected_value?"true":"false") << "\n";);                
 
-    IF_VERBOSE(10, display_detailed_analysis(verbose_stream(), ev, a));
+    IF_VERBOSE(11, display_detailed_analysis(verbose_stream(), ev, a));
 }
 
 void cmd_context::display_detailed_analysis(std::ostream& out, model_evaluator& ev, expr* e) {
@@ -1973,9 +2009,9 @@ void cmd_context::display_detailed_analysis(std::ostream& out, model_evaluator& 
 }
 
 void cmd_context::mk_solver() {
-    bool proofs_enabled, models_enabled, unsat_core_enabled;
+    bool proofs_enabled = m().proofs_enabled(), models_enabled = true, unsat_core_enabled = true;
     params_ref p;
-    m_params.get_solver_params(m(), p, proofs_enabled, models_enabled, unsat_core_enabled);
+    m_params.get_solver_params(p, proofs_enabled, models_enabled, unsat_core_enabled);
     m_solver = (*m_solver_factory)(m(), p, proofs_enabled, models_enabled, unsat_core_enabled, m_logic);
 }
 
